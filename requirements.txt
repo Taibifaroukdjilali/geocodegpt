@@ -1,22 +1,11 @@
-# ============================================================
-# requirements.txt for Streamlit Cloud Deployment
-# ============================================================
-
-# Core dependencies
 streamlit>=1.28.0
 torch>=2.0.0
 transformers>=4.30.0
 accelerate>=0.20.0
-
-# For downloading from Google Drive
 gdown>=4.7.0
-
-# Additional utilities
 safetensors>=0.3.0
 sentencepiece>=0.1.99
 protobuf>=3.20.0
-
-# For better performance
 bitsandbytes>=0.41.0
 scipy>=1.10.0
 numpy>=1.24.0
