@@ -1,96 +1,21 @@
 # ============================================================
-# app.py - GeoCode-GPT with Google Drive Integration
+# app.py - GeoCode-GPT with Direct File Upload
 # ============================================================
 
 import streamlit as st
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
-import subprocess
+import zipfile
 import shutil
 import json
-import time
-import sys
 
 # ============================================================
-# CONFIGURATION - YOUR CORRECT FOLDER ID
+# CONFIGURATION
 # ============================================================
 
-DRIVE_FOLDER_ID = "1738_TVggvUcf-5e8Bxz7KJ-_281kW6vW"
 MODEL_PATH = "/tmp/geocode_model"
-
-# ============================================================
-# DOWNLOAD FUNCTIONS
-# ============================================================
-
-def check_and_install_dependencies():
-    """Check and install missing dependencies"""
-    try:
-        import sentencepiece
-        return True
-    except ImportError:
-        st.warning("⚠️ sentencepiece not found. Installing...")
-        subprocess.run([sys.executable, "-m", "pip", "install", "sentencepiece"], 
-                      capture_output=True)
-        try:
-            import sentencepiece
-            st.success("✅ sentencepiece installed successfully!")
-            return True
-        except:
-            st.error("❌ Failed to install sentencepiece")
-            return False
-
-def download_model_from_drive():
-    """Download model from Google Drive using gdown"""
-    try:
-        os.makedirs(MODEL_PATH, exist_ok=True)
-        
-        st.info("📥 Downloading model from Google Drive...")
-        st.info("⏳ This may take 5-10 minutes...")
-        
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        status_text.text("Downloading model files...")
-        progress_bar.progress(30)
-        
-        # Download the folder
-        cmd = f"gdown --folder {DRIVE_FOLDER_ID} -O {MODEL_PATH}"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        
-        progress_bar.progress(80)
-        status_text.text("Processing downloaded files...")
-        
-        if result.returncode == 0:
-            files = os.listdir(MODEL_PATH)
-            model_files = [f for f in files if f.endswith(('.bin', '.safetensors'))]
-            
-            if model_files:
-                progress_bar.progress(100)
-                status_text.text("✅ Download complete!")
-                st.success(f"✅ Downloaded {len(model_files)} model weight files!")
-                return True
-            else:
-                st.warning("⚠️ Downloaded folder but no model weights found.")
-                return False
-        else:
-            st.error(f"❌ Download failed: {result.stderr}")
-            return False
-            
-    except Exception as e:
-        st.error(f"❌ Download error: {e}")
-        return False
-
-def download_with_retry():
-    """Download with retry logic"""
-    max_retries = 3
-    for attempt in range(max_retries):
-        st.info(f"📥 Download attempt {attempt + 1}/{max_retries}...")
-        if download_model_from_drive():
-            return True
-        st.warning(f"Attempt {attempt + 1} failed. Retrying...")
-        time.sleep(5)
-    return False
+ZIP_PATH = "/tmp/model.zip"  # Optional: if you upload a zip file
 
 # ============================================================
 # MODEL LOADER
@@ -98,48 +23,69 @@ def download_with_retry():
 
 @st.cache_resource
 def load_model():
-    """Load the model with caching for better performance"""
+    """Load the model from /tmp directory"""
     
-    # Check and install dependencies
-    if not check_and_install_dependencies():
-        st.error("❌ Missing required dependencies")
-        return None, None
-    
-    # Check if model exists and is valid
-    if os.path.exists(MODEL_PATH):
+    # Check if model files exist directly
+    if os.path.exists(MODEL_PATH) and os.listdir(MODEL_PATH):
+        st.info(f"📁 Found {len(os.listdir(MODEL_PATH))} files in model directory")
         files = os.listdir(MODEL_PATH)
+        
+        # Check for model weights
         model_files = [f for f in files if f.endswith(('.bin', '.safetensors'))]
+        if model_files:
+            st.success(f"✅ Found {len(model_files)} model weight files")
+        else:
+            st.error("❌ No model weight files found (.bin or .safetensors)")
+            st.info("Please upload your model files to /tmp/geocode_model/")
+            return None, None
         
         # Check for tokenizer files
-        has_tokenizer = any(f in files for f in ['tokenizer.json', 'tokenizer.model'])
-        
-        if model_files and has_tokenizer:
-            st.info(f"✅ Found {len(model_files)} model files locally. Loading...")
+        tokenizer_files = [f for f in files if 'tokenizer' in f]
+        if tokenizer_files:
+            st.success(f"✅ Found {len(tokenizer_files)} tokenizer files")
         else:
-            st.warning("📦 Model files found but incomplete. Re-downloading...")
-            shutil.rmtree(MODEL_PATH)
-            os.makedirs(MODEL_PATH, exist_ok=True)
+            st.warning("⚠️ Tokenizer files may be missing")
+    
+    # If model directory doesn't exist or is empty, try to extract from zip
+    elif os.path.exists(ZIP_PATH):
+        st.info("📦 Extracting model from uploaded ZIP file...")
+        try:
+            # Remove existing directory if it exists
+            if os.path.exists(MODEL_PATH):
+                shutil.rmtree(MODEL_PATH)
             
-            if not download_with_retry():
-                st.error("❌ Failed to download model. Please check your Drive link.")
-                return None, None
-    else:
-        # First time - download from Drive
-        st.info("📦 Model not found locally. Downloading from Google Drive...")
-        if not download_with_retry():
-            st.error("❌ Failed to download model. Please check your Drive link.")
+            # Extract zip
+            with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
+                zip_ref.extractall(MODEL_PATH)
+            st.success("✅ Model extracted successfully!")
+            
+            # Verify extraction
+            files = os.listdir(MODEL_PATH)
+            st.info(f"📁 Extracted {len(files)} files")
+            
+        except Exception as e:
+            st.error(f"❌ Failed to extract model: {e}")
+            st.info("Please upload your model files directly to /tmp/geocode_model/")
             return None, None
+    else:
+        # No model found anywhere
+        st.error("❌ No model files found!")
+        st.info("""
+        **Please upload your model files:**
+        1. In the Streamlit Cloud dashboard, go to the Files section
+        2. Navigate to `/tmp/geocode_model/`
+        3. Upload all model files (config.json, model-*.safetensors, tokenizer files)
+        **OR**
+        1. Upload a ZIP file named `model.zip` to `/tmp/`
+        """)
+        return None, None
     
     # Load the model
     try:
         st.info("🧠 Loading model into memory...")
         
-        # Load tokenizer with use_fast=False to use slow tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(
-            MODEL_PATH,
-            use_fast=False  # Use slow tokenizer with sentencepiece
-        )
-        
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
@@ -160,12 +106,15 @@ def load_model():
         # Show detailed troubleshooting
         st.info("""
         **Troubleshooting:**
-        1. Make sure `sentencepiece` is installed in requirements.txt
-        2. Your Drive folder should contain:
-           - config.json ✓
-           - model-*.safetensors files ✓
-           - tokenizer.json or tokenizer.model (missing!)
-        3. Check that folder permissions are set to "Anyone with the link"
+        1. Make sure your model directory contains:
+           - config.json
+           - model-*.safetensors files (all 6 parts)
+           - tokenizer.json
+           - tokenizer.model
+           - tokenizer_config.json
+           - special_tokens_map.json
+        2. Check that the files are not corrupted
+        3. Ensure all files are in `/tmp/geocode_model/`
         """)
         
         # Show what files are in the directory
@@ -173,22 +122,11 @@ def load_model():
             files = os.listdir(MODEL_PATH)
             st.write("📁 Files in model directory:", files)
             
-            # Check specifically for tokenizer files
-            tokenizer_files = [f for f in files if 'tokenizer' in f]
-            if tokenizer_files:
-                st.write("✅ Found tokenizer files:", tokenizer_files)
-            else:
-                st.error("❌ No tokenizer files found! This is the problem.")
-                st.info("""
-                **Solution:** Your Drive folder is missing tokenizer files.
-                You need to upload:
-                - tokenizer.json
-                - tokenizer.model
-                - tokenizer_config.json
-                - special_tokens_map.json
-                
-                These files should be in your model folder. Please upload them to Drive.
-                """)
+            # Check specifically for required files
+            required_files = ['config.json']
+            missing = [f for f in required_files if f not in files]
+            if missing:
+                st.error(f"❌ Missing required files: {missing}")
         
         return None, None
 
@@ -227,12 +165,14 @@ def generate_code(tokenizer, model, prompt, max_tokens, temperature):
 # STREAMLIT UI
 # ============================================================
 
+# Page configuration
 st.set_page_config(
     page_title="🌍 GeoCode-GPT",
     page_icon="🌍",
     layout="wide"
 )
 
+# Header
 st.title("🌍 GeoCode-GPT - Earth Engine Code Generator")
 st.markdown("""
 Generate Google Earth Engine JavaScript code using AI.
@@ -242,8 +182,23 @@ Describe what you want to do, and the model will generate the code!
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Settings")
-    max_tokens = st.slider("Max Tokens", 256, 2048, 1024)
-    temperature = st.slider("Temperature", 0.1, 1.0, 0.7, 0.05)
+    max_tokens = st.slider(
+        "Max Tokens",
+        min_value=256,
+        max_value=2048,
+        value=1024,
+        step=64,
+        help="Maximum length of generated code"
+    )
+    
+    temperature = st.slider(
+        "Temperature",
+        min_value=0.1,
+        max_value=1.0,
+        value=0.7,
+        step=0.05,
+        help="Higher = more creative, Lower = more deterministic"
+    )
     
     st.divider()
     
@@ -258,24 +213,50 @@ with st.sidebar:
             st.success(f"✅ Model ready")
             st.caption(f"   - {len(model_files)} weight files")
             st.caption(f"   - {len(tokenizer_files)} tokenizer files")
+            
+            # Show total size
+            total_size = 0
+            for f in model_files:
+                try:
+                    size = os.path.getsize(os.path.join(MODEL_PATH, f)) / (1024**3)
+                    total_size += size
+                except:
+                    pass
+            if total_size > 0:
+                st.caption(f"📊 Total size: ~{total_size:.1f} GB")
+        elif model_files:
+            st.warning("⚠️ Model weights found, but tokenizer files missing")
+        elif tokenizer_files:
+            st.warning("⚠️ Tokenizer files found, but model weights missing")
         else:
-            st.warning("⏳ Model not fully loaded")
-            if not model_files:
-                st.caption("⚠️ Missing model weights")
-            if not tokenizer_files:
-                st.caption("⚠️ Missing tokenizer files")
+            st.warning("⏳ Model files not found")
     else:
-        st.info("⏳ First time setup...")
+        st.info("⏳ No model loaded yet")
     
     st.divider()
-    st.caption("📁 Model from Google Drive")
+    st.caption("🔧 Built with ❤️ using Transformers & Streamlit")
+    st.caption("📁 Model loaded from /tmp/geocode_model/")
 
 # Load model
-with st.spinner("🔄 Loading model (first time may take 5-10 minutes)..."):
+with st.spinner("🔄 Loading model (this may take 2-3 minutes)..."):
     tokenizer, model = load_model()
 
 if tokenizer is None or model is None:
-    st.error("❌ Failed to load model. Please check the error messages above.")
+    st.error("❌ Failed to load model. Please upload your model files.")
+    st.info("""
+    **How to upload model files:**
+    1. Go to your Streamlit Cloud app dashboard
+    2. Click on the "Files" section
+    3. Navigate to `/tmp/geocode_model/`
+    4. Upload all model files:
+       - config.json
+       - model-00001-of-00006.safetensors through model-00006-of-00006.safetensors
+       - tokenizer.json
+       - tokenizer.model
+       - tokenizer_config.json
+       - special_tokens_map.json
+    5. Refresh the app
+    """)
     st.stop()
 
 # Main interface
@@ -285,7 +266,8 @@ with col1:
     prompt = st.text_area(
         "🌍 Describe what you want to do:",
         height=150,
-        placeholder="Example: Create a true color composite of Sentinel-2 for California"
+        placeholder="Example: Create a true color composite of Sentinel-2 for California",
+        help="Be specific about the region, dataset, and analysis"
     )
 
 with col2:
@@ -295,7 +277,9 @@ with col2:
         "Calculate NDVI for a region in Brazil using Landsat 8",
         "Export a Landsat 8 image to Google Drive",
         "Create an NDWI water body detection using Sentinel-2",
-        "Generate a land cover classification using Random Forest"
+        "Generate a land cover classification using Random Forest",
+        "Create a time series chart of vegetation health",
+        "Detect deforestation using Sentinel-2 time series"
     ]
     
     for example in examples:
@@ -304,17 +288,21 @@ with col2:
             prompt = example
             st.rerun()
 
+# Generate button
 if st.button("🚀 Generate Code", type="primary", use_container_width=True):
     if not prompt:
-        st.warning("Please enter a description.")
+        st.warning("Please enter a description of what you want to do.")
     else:
         with st.spinner("🤖 Generating code..."):
             try:
+                # Generate code
                 response = generate_code(tokenizer, model, prompt, max_tokens, temperature)
                 
+                # Display results
                 st.subheader("💻 Generated Code")
                 st.code(response, language="javascript")
                 
+                # Download button
                 st.download_button(
                     label="📥 Download Code",
                     data=response,
@@ -325,3 +313,8 @@ if st.button("🚀 Generate Code", type="primary", use_container_width=True):
                 
             except Exception as e:
                 st.error(f"❌ Error generating code: {e}")
+                st.info("Try adjusting the temperature or max tokens settings.")
+
+# Footer
+st.divider()
+st.caption("📌 Tip: Generated code is for Google Earth Engine JavaScript API")
