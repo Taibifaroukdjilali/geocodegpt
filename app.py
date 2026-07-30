@@ -8,14 +8,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
 import subprocess
 import shutil
-import time
 import json
+import time
 
 # ============================================================
-# CONFIGURATION - YOUR GOOGLE DRIVE FOLDER ID
+# CONFIGURATION - YOUR CORRECT FOLDER ID
 # ============================================================
 
-# Your actual Google Drive folder ID
+# Your actual Google Drive folder ID from the URL
 DRIVE_FOLDER_ID = "1738_TVggvUcf-5e8Bxz7KJ-_281kW6vW"
 MODEL_PATH = "/tmp/geocode_model"
 
@@ -40,7 +40,7 @@ def download_model_from_drive():
         status_text.text("Downloading model files...")
         progress_bar.progress(30)
         
-        # Command to download folder - removed --remaining-ok flag
+        # Command to download folder
         cmd = f"gdown --folder {DRIVE_FOLDER_ID} -O {MODEL_PATH}"
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         
@@ -60,25 +60,6 @@ def download_model_from_drive():
                 return True
             else:
                 st.warning("⚠️ Downloaded folder but no model weights found.")
-                st.info("Checking subdirectories...")
-                
-                # Search for model files in subdirectories
-                for root, dirs, files in os.walk(MODEL_PATH):
-                    for file in files:
-                        if file.endswith(('.bin', '.safetensors')):
-                            # Move files to main directory
-                            src = os.path.join(root, file)
-                            dst = os.path.join(MODEL_PATH, file)
-                            shutil.move(src, dst)
-                            st.info(f"Moved {file} to main directory")
-                
-                # Check again
-                files = os.listdir(MODEL_PATH)
-                if any(f.endswith(('.bin', '.safetensors')) for f in files):
-                    progress_bar.progress(100)
-                    st.success("✅ Model files found and organized!")
-                    return True
-                
                 return False
         else:
             st.error(f"❌ Download failed: {result.stderr}")
@@ -88,66 +69,19 @@ def download_model_from_drive():
         st.error(f"❌ Download error: {e}")
         return False
 
-def download_individual_files():
-    """Alternative: Download individual files using gdown"""
-    try:
-        st.info("📥 Trying alternative download method...")
-        
-        # First, list all files in the folder using gdown
-        cmd = f"gdown --folder {DRIVE_FOLDER_ID} --list"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        
-        if result.returncode == 0:
-            # Parse the output to get file IDs
-            # This is a simplified approach - gdown will handle the folder download
-            st.info("Downloading entire folder with gdown...")
-            cmd = f"gdown --folder {DRIVE_FOLDER_ID} -O {MODEL_PATH}"
-            result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-            
-            if result.returncode == 0:
-                st.success("✅ Alternative download successful!")
-                return True
-        
-        return False
-        
-    except Exception as e:
-        st.error(f"❌ Alternative download error: {e}")
-        return False
-
-def check_model_files():
-    """Check if model files are present and valid"""
-    if not os.path.exists(MODEL_PATH):
-        return False
-    
-    files = os.listdir(MODEL_PATH)
-    
-    # Check for required files
-    required_files = ['config.json']
-    for file in required_files:
-        if file not in files:
-            st.warning(f"⚠️ Missing required file: {file}")
-            return False
-    
-    # Check for model weights
-    model_files = [f for f in files if f.endswith(('.bin', '.safetensors'))]
-    if not model_files:
-        st.warning("⚠️ No model weights found (.bin or .safetensors files)")
-        return False
-    
-    # Check if config.json is valid
-    try:
-        config_path = os.path.join(MODEL_PATH, 'config.json')
-        with open(config_path, 'r') as f:
-            config = json.load(f)
-        st.info(f"✅ Config loaded: {config.get('model_type', 'unknown')} model")
-    except:
-        st.warning("⚠️ Invalid config.json file")
-        return False
-    
-    return True
+def download_with_retry():
+    """Download with retry logic"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        st.info(f"📥 Download attempt {attempt + 1}/{max_retries}...")
+        if download_model_from_drive():
+            return True
+        st.warning(f"Attempt {attempt + 1} failed. Retrying...")
+        time.sleep(5)
+    return False
 
 # ============================================================
-# MODEL LOADER WITH CACHING
+# MODEL LOADER
 # ============================================================
 
 @st.cache_resource
@@ -156,25 +90,25 @@ def load_model():
     
     # Check if model exists and is valid
     if os.path.exists(MODEL_PATH):
-        if check_model_files():
-            st.info("✅ Model files found locally. Loading...")
+        files = os.listdir(MODEL_PATH)
+        model_files = [f for f in files if f.endswith(('.bin', '.safetensors'))]
+        
+        if model_files:
+            st.info(f"✅ Found {len(model_files)} model files locally. Loading...")
         else:
             st.warning("📦 Model files found but incomplete. Re-downloading...")
             shutil.rmtree(MODEL_PATH)
             os.makedirs(MODEL_PATH, exist_ok=True)
             
-            # Try both download methods
-            if not download_model_from_drive():
-                if not download_individual_files():
-                    st.error("❌ Failed to download model. Please check your Drive link.")
-                    return None, None
+            if not download_with_retry():
+                st.error("❌ Failed to download model. Please check your Drive link.")
+                return None, None
     else:
         # First time - download from Drive
         st.info("📦 Model not found locally. Downloading from Google Drive...")
-        if not download_model_from_drive():
-            if not download_individual_files():
-                st.error("❌ Failed to download model. Please check your Drive link.")
-                return None, None
+        if not download_with_retry():
+            st.error("❌ Failed to download model. Please check your Drive link.")
+            return None, None
     
     # Load the model
     try:
@@ -204,7 +138,7 @@ def load_model():
         **Troubleshooting:**
         1. Make sure your Drive folder contains:
            - config.json
-           - pytorch_model.bin or model.safetensors
+           - model-*.safetensors files
            - tokenizer files
         2. Check that folder permissions are set to "Anyone with the link"
         3. Verify the folder ID is correct: {}
@@ -213,7 +147,7 @@ def load_model():
         # Show what files are in the directory
         if os.path.exists(MODEL_PATH):
             files = os.listdir(MODEL_PATH)
-            st.write("📁 Files in model directory:", files)
+            st.write("📁 Files in model directory:", files[:10])  # Show first 10 files
         
         return None, None
 
@@ -296,17 +230,20 @@ with st.sidebar:
         model_files = [f for f in files if f.endswith(('.bin', '.safetensors'))]
         
         if model_files:
-            st.success(f"✅ Model ready ({len(model_files)} weight files)")
+            st.success(f"✅ {len(model_files)} weight files")
             
             # Show file sizes
+            total_size = 0
             for f in model_files[:3]:  # Show first 3 files
                 try:
                     size = os.path.getsize(os.path.join(MODEL_PATH, f)) / (1024**3)
+                    total_size += size
                     st.caption(f"   - {f} ({size:.2f} GB)")
                 except:
                     pass
             if len(model_files) > 3:
                 st.caption(f"   ... and {len(model_files) - 3} more files")
+            st.caption(f"📊 Total: ~{total_size:.1f} GB")
         else:
             st.warning("⏳ Model not loaded")
     else:
@@ -314,7 +251,7 @@ with st.sidebar:
     
     st.divider()
     st.caption("🔧 Built with ❤️ using Transformers & Streamlit")
-    st.caption(f"📁 Model from Google Drive: `{DRIVE_FOLDER_ID[:8]}...`")
+    st.caption(f"📁 Model from Google Drive")
 
 # Load model
 with st.spinner("🔄 Loading model (first time may take 5-10 minutes)..."):
@@ -322,6 +259,13 @@ with st.spinner("🔄 Loading model (first time may take 5-10 minutes)..."):
 
 if tokenizer is None or model is None:
     st.error("❌ Failed to load model. Please check the error messages above.")
+    st.info("""
+    **Quick Fix:**
+    1. Make sure your Drive folder is shared with "Anyone with the link"
+    2. Check your folder ID: `1738_TVggvUcf-5e8Bxz7KJ-_281kW6vW`
+    3. Try refreshing the page and trying again
+    4. If the download keeps failing, upload the files directly to `/tmp/geocode_model/`
+    """)
     st.stop()
 
 # Main interface
@@ -343,13 +287,12 @@ with col2:
         "Export a Landsat 8 image to Google Drive",
         "Create an NDWI water body detection using Sentinel-2",
         "Generate a land cover classification using Random Forest",
-        "Create a time series chart of vegetation health",
-        "Detect deforestation using Sentinel-2 time series",
-        "Export images for each month as a GIF animation"
+        "Create a time series chart of vegetation health"
     ]
     
     for example in examples:
-        if st.button(example[:30] + "...", key=example, use_container_width=True):
+        if st.button(example[:30] + "..." if len(example) > 30 else example, 
+                     key=example, use_container_width=True):
             prompt = example
             st.rerun()
 
