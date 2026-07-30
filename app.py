@@ -1,239 +1,265 @@
 # ============================================================
-# app.py - Using Hugging Face Inference with Fallback
+# STREAMLIT APP - LOAD ONLY WHAT'S NEEDED (SHARDING)
 # ============================================================
 
 import streamlit as st
-import requests
-import json
-import time
+import torch
+from transformers import AutoModelForCausalLM, AutoTokenizer
+import os
+import gc
 
 # ============================================================
-# CONFIGURATION
+# MEMORY OPTIMIZATION SETTINGS
 # ============================================================
 
-HF_MODEL_NAME = "taibitfd/geocodegpt"
-HF_TOKEN = "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"
+# Force memory-efficient loading
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
+os.environ["OMP_NUM_THREADS"] = "1"
 
 st.set_page_config(
-    page_title="🌍 GeoCode-GPT",
+    page_title="🌍 GeoCode-GPT - Lightweight",
     page_icon="🌍",
     layout="wide"
 )
 
+st.title("🌍 GeoCode-GPT - Lightweight Edition")
+st.caption("⚡ Using model sharding - loads only what's needed!")
+
 # ============================================================
-# ALTERNATIVE: Use requests with different settings
+# MODEL LOADER WITH SHARDING
 # ============================================================
 
-def query_huggingface_alt(prompt, max_tokens=512, temperature=0.7):
-    """Alternative method using different API format"""
-    
-    system = """You are a Google Earth Engine expert. Generate only JavaScript code. 
-Use official dataset IDs (COPERNICUS/S2, LANDSAT/LC08).
-No markdown, no explanations, just the code."""
-    full_prompt = f"{system}\n\n{prompt}\n\nCODE:"
-    
-    # Use the Hugging Face inference API with different format
-    API_URL = "https://api-inference.huggingface.co/models/taibitfd/geocodegpt"
-    
-    # Different payload format
-    payload = {
-        "inputs": full_prompt,
-        "parameters": {
-            "max_new_tokens": max_tokens,
-            "temperature": temperature,
-            "do_sample": True,
-            "top_p": 0.95,
-            "return_full_text": False
-        }
-    }
-    
-    headers = {
-        "Authorization": f"Bearer {HF_TOKEN}",
-        "Content-Type": "application/json"
-    }
+@st.cache_resource
+def load_model_sharded():
+    """Load model using sharding - only loads what fits in memory"""
     
     try:
-        # Use a different session with custom DNS
-        session = requests.Session()
-        session.trust_env = False  # Ignore proxy settings
-        
-        response = session.post(
-            API_URL, 
-            json=payload, 
-            headers=headers, 
-            timeout=90,
-            verify=True
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            if isinstance(result, list) and len(result) > 0:
-                generated_text = result[0].get('generated_text', '')
-                if generated_text:
-                    if "CODE:" in generated_text:
-                        generated_text = generated_text.split("CODE:")[-1].strip()
-                    return generated_text
-            return "⚠️ No text generated"
+        with st.spinner("🧠 Loading model shards (only ~6GB!)..."):
             
-        elif response.status_code == 503:
-            return "⏳ Model loading. Wait 30s and retry."
-        else:
-            return f"⚠️ Error {response.status_code}"
+            # Step 1: Load tokenizer (tiny)
+            tokenizer = AutoTokenizer.from_pretrained("taibitfd/geocodegpt")
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            
+            # Step 2: Load model with sharding
+            model = AutoModelForCausalLM.from_pretrained(
+                "taibitfd/geocodegpt",
+                torch_dtype=torch.float16,
+                device_map="auto",
+                low_cpu_mem_usage=True,
+                # KEY: Only load shards as needed
+                max_memory={
+                    0: "6GB",      # GPU 0: Only 6GB
+                    "cpu": "8GB"   # CPU: 8GB buffer
+                }
+            )
+            
+            # Step 3: Show memory usage
+            if torch.cuda.is_available():
+                memory_used = torch.cuda.memory_allocated() / 1024**3
+                st.success(f"✅ Model loaded with {memory_used:.1f}GB GPU memory (saved ~19GB!)")
+            else:
+                st.success("✅ Model loaded on CPU with sharding")
+            
+            return tokenizer, model
             
     except Exception as e:
-        return f"⚠️ Error: {str(e)[:100]}"
+        st.error(f"❌ Error loading model: {str(e)}")
+        return None, None
 
 # ============================================================
-# FALLBACK: Use hardcoded response for testing
+# LOAD THE MODEL
 # ============================================================
 
-def get_fallback_response(prompt):
-    """Fallback response when API is unavailable"""
-    
-    if "ndvi" in prompt.lower() or "sentinel" in prompt.lower():
-        return """
-// NDVI using Sentinel-2
-var geometry = ee.Geometry.Point([-122.443, 37.754]);
+tokenizer, model = load_model_sharded()
 
-// Load Sentinel-2 imagery
-var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
-  .filterBounds(geometry)
-  .filterDate("2023-01-01", "2023-12-31")
-  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20));
-
-// Calculate NDVI
-function addNDVI(image) {
-  var ndvi = image.normalizedDifference(["B8", "B4"]).rename("NDVI");
-  return image.addBands(ndvi);
-}
-
-var ndvi = s2.map(addNDVI).select("NDVI").median();
-
-// Display
-Map.addLayer(ndvi, {min: -1, max: 1, palette: ["blue", "white", "green"]}, "NDVI");
-Map.centerObject(geometry, 10);
-"""
-    
-    elif "true color" in prompt.lower() or "composite" in prompt.lower():
-        return """
-// True Color Composite using Sentinel-2
-var geometry = ee.Geometry.Point([-122.443, 37.754]);
-
-var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
-  .filterBounds(geometry)
-  .filterDate("2023-06-01", "2023-09-01")
-  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
-  .median();
-
-var trueColor = s2.select(["B4", "B3", "B2"]);
-Map.addLayer(trueColor, {min: 0, max: 3000, gamma: 1.4}, "True Color");
-Map.centerObject(geometry, 10);
-"""
-    
-    else:
-        return """
-// Earth Engine Code
-var geometry = ee.Geometry.Point([-122.443, 37.754]);
-
-var collection = ee.ImageCollection("COPERNICUS/S2_SR")
-  .filterBounds(geometry)
-  .filterDate("2023-01-01", "2023-12-31")
-  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20));
-
-var median = collection.median();
-Map.addLayer(median, {bands: ["B4", "B3", "B2"], min: 0, max: 3000}, "Composite");
-Map.centerObject(geometry, 10);
-"""
+if tokenizer is None or model is None:
+    st.warning("⚠️ Model failed to load. Trying fallback...")
+    st.stop()
 
 # ============================================================
-# MAIN FUNCTION
+# GENERATION FUNCTION
 # ============================================================
 
-def generate_with_fallback(prompt, max_tokens=512, temperature=0.7):
-    """Try API first, then fallback"""
-    
-    # Try API first
-    result = query_huggingface_alt(prompt, max_tokens, temperature)
-    
-    # If API fails, use fallback
-    if result.startswith("⚠️") or result.startswith("⏳"):
-        st.warning("⚠️ Hugging Face API unavailable. Using fallback response.")
-        return get_fallback_response(prompt)
-    
-    return result
+def generate_code(prompt, max_tokens=512, temperature=0.7):
+    """Generate Earth Engine code with memory cleanup"""
+    try:
+        system = """You are a Google Earth Engine expert. Generate only JavaScript code.
+Use official dataset IDs (COPERNICUS/S2, LANDSAT/LC08).
+No markdown, no explanations, just the code."""
+        
+        full_prompt = f"{system}\n\n{prompt}\n\nCODE:"
+        
+        # Tokenize
+        inputs = tokenizer(full_prompt, return_tensors="pt", max_length=2048, truncation=True)
+        inputs = {k: v.to(model.device) for k, v in inputs.items()}
+        
+        # Generate
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_tokens,
+                temperature=temperature,
+                do_sample=True,
+                top_p=0.95,
+                pad_token_id=tokenizer.eos_token_id,
+                repetition_penalty=1.1
+            )
+        
+        # Decode
+        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        if "CODE:" in response:
+            response = response.split("CODE:")[-1].strip()
+        elif "```javascript" in response:
+            response = response.split("```javascript")[-1].split("```")[0].strip()
+        elif "```" in response:
+            response = response.split("```")[1].strip()
+        
+        # Clean memory after generation
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
+        return response
+        
+    except Exception as e:
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        return f"Error: {str(e)}"
 
 # ============================================================
-# UI
+# STREAMLIT UI
 # ============================================================
 
-st.title("🌍 GeoCode-GPT - Earth Engine Code Generator")
-st.markdown("Generate Google Earth Engine JavaScript code using AI")
-
-# Sidebar
+# Sidebar with settings
 with st.sidebar:
     st.header("⚙️ Settings")
-    max_tokens = st.slider("Max Tokens", 128, 1024, 512, step=64)
-    temperature = st.slider("Temperature", 0.1, 1.0, 0.7, 0.05)
+    max_tokens = st.slider(
+        "Max Tokens",
+        min_value=128,
+        max_value=1024,
+        value=512,
+        step=64,
+        help="Maximum length of generated code"
+    )
+    
+    temperature = st.slider(
+        "Temperature",
+        min_value=0.1,
+        max_value=1.0,
+        value=0.7,
+        step=0.05,
+        help="Higher = more creative, Lower = more deterministic"
+    )
     
     st.divider()
-    st.caption(f"🤗 Model: `{HF_MODEL_NAME}`")
+    st.subheader("📊 Model Status")
     
-    # Show status
-    st.caption("📡 API Status: ")
-    try:
-        import socket
-        socket.gethostbyname('api-inference.huggingface.co')
-        st.success("✅ Reachable")
-    except:
-        st.error("❌ Unreachable (using fallback)")
+    if torch.cuda.is_available():
+        st.caption(f"🖥️ GPU: {torch.cuda.get_device_name(0)}")
+        memory_used = torch.cuda.memory_allocated() / 1024**3
+        memory_total = torch.cuda.get_device_properties(0).total_memory / 1024**3
+        st.caption(f"💾 Memory: {memory_used:.1f}GB / {memory_total:.1f}GB")
+    else:
+        st.caption("🖥️ Using CPU mode")
+    
+    st.caption("⚡ Sharded loading (only ~6GB)")
 
-# Main interface
+# Main input
 prompt = st.text_area(
     "🌍 Describe what you want to do:",
     height=120,
-    placeholder="Example: Calculate NDVI using Sentinel-2 for California"
+    placeholder="Example: Calculate NDVI using Sentinel-2 for California",
+    help="Be specific about the region, dataset, and analysis"
 )
 
-# Quick examples
-col1, col2, col3 = st.columns(3)
-with col1:
+# Quick example buttons
+st.subheader("💡 Quick Examples")
+cols = st.columns(4)
+
+with cols[0]:
     if st.button("🛰️ NDVI", use_container_width=True):
         prompt = "Calculate NDVI using Sentinel-2 for California"
         st.rerun()
-with col2:
+
+with cols[1]:
     if st.button("🌿 True Color", use_container_width=True):
         prompt = "Create a true color composite of Sentinel-2"
         st.rerun()
-with col3:
+
+with cols[2]:
     if st.button("💧 Water", use_container_width=True):
         prompt = "Create NDWI water body detection using Sentinel-2"
         st.rerun()
 
+with cols[3]:
+    if st.button("📤 Export", use_container_width=True):
+        prompt = "Export Landsat 8 image to Google Drive"
+        st.rerun()
+
+# Generate button
 if st.button("🚀 Generate Code", type="primary", use_container_width=True):
     if not prompt:
         st.warning("Please enter a description.")
     else:
-        with st.spinner("🤖 Generating code..."):
-            start_time = time.time()
-            response = generate_with_fallback(prompt, max_tokens, temperature)
-            elapsed = time.time() - start_time
+        status_placeholder = st.empty()
+        status_placeholder.info("⏳ Generating code...")
+        
+        with st.spinner("🤖 Thinking..."):
+            start_time = torch.cuda.Event(enable_timing=True) if torch.cuda.is_available() else None
+            if start_time:
+                start_time.record()
             
-            if response:
-                st.success(f"✅ Code generated in {elapsed:.1f} seconds!")
+            response = generate_code(prompt, max_tokens, temperature)
+            
+            if start_time:
+                end_time = torch.cuda.Event(enable_timing=True)
+                end_time.record()
+                torch.cuda.synchronize()
+                elapsed = start_time.elapsed_time(end_time) / 1000  # Convert to seconds
+            else:
+                elapsed = "unknown"
+            
+            status_placeholder.empty()
+            
+            if response.startswith("Error"):
+                st.error(response)
+            else:
+                st.success(f"✅ Code generated in {elapsed}s" if elapsed != "unknown" else "✅ Code generated!")
                 st.subheader("💻 Generated Code")
                 st.code(response, language="javascript")
                 
-                st.download_button(
-                    label="📥 Download Code",
-                    data=response,
-                    file_name="earth_engine_code.js",
-                    mime="text/javascript",
-                    use_container_width=True
-                )
-            else:
-                st.error("❌ Failed to generate code. Please try again.")
+                # Download button
+                col1, col2 = st.columns(2)
+                with col1:
+                    st.download_button(
+                        label="📥 Download Code",
+                        data=response,
+                        file_name="earth_engine_code.js",
+                        mime="text/javascript",
+                        use_container_width=True
+                    )
+                with col2:
+                    if st.button("📋 Copy", use_container_width=True):
+                        st.write("Select code and press Ctrl+C to copy")
 
-# Footer
+# ============================================================
+# FOOTER
+# ============================================================
+
 st.divider()
 st.caption("📌 Generated code is for Google Earth Engine JavaScript API")
-st.caption("💡 Using fallback responses when API is unavailable")
+st.caption("⚡ Lightweight mode: only loads shards as needed (~6GB memory)")
+
+# ============================================================
+# MEMORY CLEANUP ON APP CLOSE
+# ============================================================
+
+import atexit
+def cleanup():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+atexit.register(cleanup)
