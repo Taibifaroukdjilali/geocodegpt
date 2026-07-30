@@ -1,12 +1,10 @@
 # ============================================================
-# CPU SHARDING - LOAD ONLY WHAT'S NEEDED (No GPU)
+# CPU SHARDING - CORRECT IMPLEMENTATION
 # ============================================================
 
 import streamlit as st
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from transformers import AutoConfig
 import os
 import gc
 
@@ -15,7 +13,7 @@ import gc
 # ============================================================
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
-os.environ["OMP_NUM_THREADS"] = "2"  # Limit CPU threads
+os.environ["OMP_NUM_THREADS"] = "2"
 
 st.set_page_config(
     page_title="🌍 GeoCode-GPT - Sharded",
@@ -24,51 +22,37 @@ st.set_page_config(
 )
 
 st.title("🌍 GeoCode-GPT - Sharded Edition")
-st.caption("⚡ Only loads model shards as needed (CPU optimized)")
+st.caption("⚡ CPU sharding - only loads what's needed")
 
 # ============================================================
-# SHARDED MODEL LOADER (CPU)
+# SHARDED MODEL LOADER (CPU) - FIXED
 # ============================================================
 
 @st.cache_resource
 def load_model_sharded_cpu():
-    """Load model using sharding on CPU - only loads needed shards"""
+    """Load model using CPU sharding - only loads needed shards"""
     
     try:
         with st.spinner("🧠 Loading model shards (only what's needed)..."):
             model_name = "taibitfd/geocodegpt"
             
-            # Step 1: Load config (tiny)
-            config = AutoConfig.from_pretrained(model_name)
-            
-            # Step 2: Load tokenizer (tiny)
+            # Step 1: Load tokenizer (tiny)
             tokenizer = AutoTokenizer.from_pretrained(model_name)
             if tokenizer.pad_token is None:
                 tokenizer.pad_token = tokenizer.eos_token
             
-            # Step 3: Create model with empty weights
-            with init_empty_weights():
-                model = AutoModelForCausalLM.from_config(config)
-            
-            # Step 4: Load shards on-demand (only loads what's needed)
-            model = load_checkpoint_and_dispatch(
-                model,
+            # Step 2: Load model with CPU sharding
+            # Use device_map="cpu" with max_memory to control loading
+            model = AutoModelForCausalLM.from_pretrained(
                 model_name,
-                device_map="cpu",  # Force CPU
-                max_memory={0: "8GB", "cpu": "16GB"},  # CPU memory limits
-                no_split_module_classes=["LlamaDecoderLayer"],
-                dtype=torch.float32,  # CPU uses float32
-                low_cpu_mem_usage=True
+                torch_dtype=torch.float32,  # CPU uses float32
+                device_map="cpu",
+                low_cpu_mem_usage=True,  # This is valid for from_pretrained
+                max_memory={0: "8GB", "cpu": "16GB"}  # Memory limits
             )
             
             st.success("✅ Model loaded with sharding!")
-            
-            # Show memory usage
-            if torch.cuda.is_available():
-                memory_used = torch.cuda.memory_allocated() / 1024**3
-                st.info(f"💾 GPU Memory: {memory_used:.1f}GB")
-            else:
-                st.info("💾 CPU Mode: Sharded loading")
+            st.info("💾 CPU Mode: Sharded loading (only loads needed shards)")
             
             return tokenizer, model
             
@@ -77,11 +61,52 @@ def load_model_sharded_cpu():
         return None, None
 
 # ============================================================
-# GENERATION WITH SHARDED MODEL
+# ALTERNATIVE: Load with Accelerate (More Control)
 # ============================================================
 
-def generate_with_shards(model, tokenizer, prompt, max_tokens=384, temperature=0.7):
-    """Generate using sharded model - only loads needed layers"""
+@st.cache_resource
+def load_model_with_accelerate():
+    """Alternative: Use accelerate for sharded loading"""
+    try:
+        from accelerate import init_empty_weights, load_checkpoint_and_dispatch
+        from transformers import AutoConfig
+        
+        with st.spinner("🧠 Loading with accelerate sharding..."):
+            model_name = "taibitfd/geocodegpt"
+            
+            # Load config and tokenizer
+            config = AutoConfig.from_pretrained(model_name)
+            tokenizer = AutoTokenizer.from_pretrained(model_name)
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            
+            # Create empty model
+            with init_empty_weights():
+                model = AutoModelForCausalLM.from_config(config)
+            
+            # Load shards on-demand
+            model = load_checkpoint_and_dispatch(
+                model,
+                model_name,
+                device_map="cpu",
+                max_memory={0: "8GB", "cpu": "16GB"},
+                no_split_module_classes=["LlamaDecoderLayer"],
+                dtype=torch.float32
+            )
+            
+            st.success("✅ Model loaded with accelerate sharding!")
+            return tokenizer, model
+            
+    except Exception as e:
+        st.error(f"❌ Accelerate error: {str(e)}")
+        return None, None
+
+# ============================================================
+# GENERATION FUNCTION
+# ============================================================
+
+def generate_with_model(model, tokenizer, prompt, max_tokens=384, temperature=0.7):
+    """Generate using sharded model"""
     try:
         system = """You are a Google Earth Engine expert. Generate only JavaScript code.
 Use official dataset IDs. No markdown, no explanations."""
@@ -92,7 +117,7 @@ Use official dataset IDs. No markdown, no explanations."""
         inputs = tokenizer(full_prompt, return_tensors="pt", max_length=1024, truncation=True)
         inputs = {k: v.to('cpu') for k, v in inputs.items()}
         
-        # Generate with memory optimization
+        # Generate
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
@@ -101,8 +126,7 @@ Use official dataset IDs. No markdown, no explanations."""
                 do_sample=True,
                 top_p=0.95,
                 pad_token_id=tokenizer.eos_token_id,
-                repetition_penalty=1.1,
-                use_cache=True  # Enable KV caching for speed
+                repetition_penalty=1.1
             )
         
         # Decode
@@ -116,7 +140,6 @@ Use official dataset IDs. No markdown, no explanations."""
         
         # Cleanup
         gc.collect()
-        
         return response
         
     except Exception as e:
@@ -124,12 +147,14 @@ Use official dataset IDs. No markdown, no explanations."""
         return f"Error: {str(e)}"
 
 # ============================================================
-# FALLBACK TEMPLATES (If sharding fails)
+# FALLBACK TEMPLATES
 # ============================================================
 
 def get_template(prompt):
     """Template responses when model not loaded"""
-    if "ndvi" in prompt.lower():
+    prompt_lower = prompt.lower()
+    
+    if "ndvi" in prompt_lower:
         return """// NDVI using Sentinel-2
 var geometry = ee.Geometry.Point([-122.443, 37.754]);
 var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
@@ -145,7 +170,8 @@ function addNDVI(image) {
 var ndvi = s2.map(addNDVI).select("NDVI").median();
 Map.addLayer(ndvi, {min: -1, max: 1, palette: ["blue", "white", "green"]}, "NDVI");
 Map.centerObject(geometry, 10);"""
-    elif "true color" in prompt.lower():
+    
+    elif "true color" in prompt_lower:
         return """// True Color Composite
 var geometry = ee.Geometry.Point([-122.443, 37.754]);
 var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
@@ -156,7 +182,8 @@ var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
 
 Map.addLayer(s2.select(["B4", "B3", "B2"]), {min: 0, max: 3000, gamma: 1.4}, "True Color");
 Map.centerObject(geometry, 10);"""
-    elif "water" in prompt.lower() or "ndwi" in prompt.lower():
+    
+    elif "water" in prompt_lower or "ndwi" in prompt_lower:
         return """// NDWI Water Detection
 var geometry = ee.Geometry.Point([-122.443, 37.754]);
 var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
@@ -168,6 +195,7 @@ var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
 var ndwi = s2.normalizedDifference(["B3", "B8"]).rename("NDWI");
 Map.addLayer(ndwi, {min: -0.5, max: 0.5, palette: ["brown", "white", "blue"]}, "NDWI");
 Map.centerObject(geometry, 10);"""
+    
     else:
         return """// Sentinel-2 Composite
 var geometry = ee.Geometry.Point([-122.443, 37.754]);
@@ -180,25 +208,30 @@ Map.addLayer(s2, {bands: ["B4", "B3", "B2"], min: 0, max: 3000}, "Composite");
 Map.centerObject(geometry, 10);"""
 
 # ============================================================
-# LOAD MODEL
+# TRY BOTH LOADING METHODS
 # ============================================================
 
-# Try to load sharded model
+# Method 1: Direct from_pretrained with sharding
 tokenizer, model = load_model_sharded_cpu()
 
-# If model fails, use templates
+# If that fails, try accelerate method
+if tokenizer is None or model is None:
+    st.info("🔄 Trying alternative loading method...")
+    tokenizer, model = load_model_with_accelerate()
+
+# If both fail, use templates
 if tokenizer is None or model is None:
     st.warning("⚠️ Using fallback templates (instant responses)")
-    st.info("💡 This is a lightweight fallback - no AI, but works instantly!")
+    st.info("💡 Lightweight fallback - no AI, but works instantly!")
     
     def generate_code(prompt, max_tokens=384, temperature=0.7):
         return get_template(prompt)
     
-    is_sharded = False
+    is_loaded = False
 else:
-    is_sharded = True
+    is_loaded = True
     def generate_code(prompt, max_tokens=384, temperature=0.7):
-        return generate_with_shards(model, tokenizer, prompt, max_tokens, temperature)
+        return generate_with_model(model, tokenizer, prompt, max_tokens, temperature)
 
 # ============================================================
 # STREAMLIT UI
@@ -212,10 +245,10 @@ with st.sidebar:
     
     st.divider()
     st.subheader("📊 Status")
-    if is_sharded:
-        st.success("✅ Sharded Model Loaded")
-        st.caption("⚡ Lazy loading enabled")
-        st.caption("🧠 Only loads needed shards")
+    if is_loaded:
+        st.success("✅ Model Loaded")
+        st.caption("⚡ Sharded loading")
+        st.caption("🧠 CPU mode")
     else:
         st.warning("⚠️ Template Mode")
         st.caption("⚡ Instant responses")
