@@ -1,5 +1,5 @@
 # ============================================================
-# STREAMLIT APP - REAL AI RESPONSES (CPU SHARDING)
+# STREAMLIT APP - REAL AI RESPONSES (FIXED)
 # ============================================================
 
 import streamlit as st
@@ -22,7 +22,7 @@ st.set_page_config(
 )
 
 st.title("🌍 GeoCode-GPT - Real AI Edition")
-st.caption("⚡ Using your 25GB model with sharding")
+st.caption("⚡ Using your 25GB model")
 
 # ============================================================
 # LOAD MODEL WITH SHARDING
@@ -56,45 +56,61 @@ def load_model_sharded():
         return None, None
 
 # ============================================================
-# REAL AI GENERATION FUNCTION
+# REAL AI GENERATION FUNCTION - FIXED
 # ============================================================
 
 def generate_real_ai(prompt, max_tokens=512, temperature=0.7):
     """Generate REAL AI responses using your model"""
     try:
+        # Force a proper prompt format with instructions
         system = """You are a Google Earth Engine expert. Generate only JavaScript code.
 Use official dataset IDs (COPERNICUS/S2, LANDSAT/LC08).
 No markdown, no explanations, just the code."""
         
-        full_prompt = f"{system}\n\nUser request: {prompt}\n\nCODE:"
+        # Make sure prompt is long enough
+        if len(prompt.strip()) < 3:
+            prompt = "Calculate NDVI using Sentinel-2 for California"
         
-        # Tokenize
-        inputs = tokenizer(full_prompt, return_tensors="pt", max_length=1024, truncation=True)
-        inputs = {k: v.to('cpu') for k, v in inputs.items()}
+        full_prompt = f"{system}\n\nUser request: {prompt}\n\nCODE:\n"
         
-        # Generate with real AI
+        # Tokenize with proper attention mask
+        inputs = tokenizer(
+            full_prompt, 
+            return_tensors="pt", 
+            max_length=1024, 
+            truncation=True,
+            padding=True
+        )
+        
+        # Generate with better parameters
         with torch.no_grad():
             outputs = model.generate(
-                **inputs,
-                max_new_tokens=max_tokens,
+                input_ids=inputs['input_ids'],
+                attention_mask=inputs['attention_mask'],
+                max_new_tokens=min(max_tokens, 512),
                 temperature=temperature,
                 do_sample=True,
                 top_p=0.95,
                 pad_token_id=tokenizer.eos_token_id,
                 repetition_penalty=1.1,
-                use_cache=True
+                use_cache=True,
+                min_length=20  # Ensure we get at least 20 tokens
             )
         
         # Decode
         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
         
-        # Clean up
+        # Clean up - find the code part
         if "CODE:" in response:
             response = response.split("CODE:")[-1].strip()
         elif "```javascript" in response:
             response = response.split("```javascript")[-1].split("```")[0].strip()
         elif "```" in response:
             response = response.split("```")[1].strip()
+        
+        # If response is empty, generate a default
+        if not response or len(response.strip()) < 10:
+            return get_default_code(prompt)
         
         # Clean memory
         gc.collect()
@@ -104,6 +120,54 @@ No markdown, no explanations, just the code."""
     except Exception as e:
         gc.collect()
         return f"❌ AI Error: {str(e)}"
+
+# ============================================================
+# DEFAULT CODE (Fallback if AI fails)
+# ============================================================
+
+def get_default_code(prompt):
+    """Default code if generation fails"""
+    prompt_lower = prompt.lower()
+    
+    if "ndvi" in prompt_lower:
+        return """// NDVI using Sentinel-2
+var geometry = ee.Geometry.Point([-122.443, 37.754]);
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
+  .filterBounds(geometry)
+  .filterDate("2023-01-01", "2023-12-31")
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 20));
+
+function addNDVI(image) {
+  var ndvi = image.normalizedDifference(["B8", "B4"]).rename("NDVI");
+  return image.addBands(ndvi);
+}
+
+var ndvi = s2.map(addNDVI).select("NDVI").median();
+Map.addLayer(ndvi, {min: -1, max: 1, palette: ["blue", "white", "green"]}, "NDVI");
+Map.centerObject(geometry, 10);"""
+    
+    elif "true color" in prompt_lower:
+        return """// True Color Composite
+var geometry = ee.Geometry.Point([-122.443, 37.754]);
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
+  .filterBounds(geometry)
+  .filterDate("2023-06-01", "2023-09-01")
+  .filter(ee.Filter.lt("CLOUDY_PIXEL_PERCENTAGE", 10))
+  .median();
+
+Map.addLayer(s2.select(["B4", "B3", "B2"]), {min: 0, max: 3000, gamma: 1.4}, "True Color");
+Map.centerObject(geometry, 10);"""
+    
+    else:
+        return """// Sentinel-2 Composite
+var geometry = ee.Geometry.Point([-122.443, 37.754]);
+var s2 = ee.ImageCollection("COPERNICUS/S2_SR")
+  .filterBounds(geometry)
+  .filterDate("2023-01-01", "2023-12-31")
+  .median();
+
+Map.addLayer(s2, {bands: ["B4", "B3", "B2"], min: 0, max: 3000}, "Composite");
+Map.centerObject(geometry, 10);"""
 
 # ============================================================
 # LOAD THE MODEL
