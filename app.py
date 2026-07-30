@@ -1,5 +1,5 @@
 # ============================================================
-# app.py - GeoCode-GPT with Direct File Upload
+# app.py - GeoCode-GPT with Multiple Upload Methods
 # ============================================================
 
 import streamlit as st
@@ -9,89 +9,132 @@ import os
 import zipfile
 import shutil
 import json
+import glob
 
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
 MODEL_PATH = "/tmp/geocode_model"
-ZIP_PATH = "/tmp/model.zip"  # Optional: if you upload a zip file
+ZIP_PATH = "/tmp/model.zip"
 
 # ============================================================
-# MODEL LOADER
+# FILE CHECKING FUNCTIONS
+# ============================================================
+
+def check_model_files():
+    """Check what files are in the model directory"""
+    if not os.path.exists(MODEL_PATH):
+        return {"exists": False, "files": [], "weights": [], "tokenizer": []}
+    
+    files = os.listdir(MODEL_PATH)
+    
+    # Check for weight files
+    weights = [f for f in files if f.endswith(('.bin', '.safetensors'))]
+    
+    # Check for tokenizer files
+    tokenizer = [f for f in files if 'tokenizer' in f.lower()]
+    
+    # Check for config
+    config = [f for f in files if f == 'config.json']
+    
+    return {
+        "exists": True,
+        "files": files,
+        "weights": weights,
+        "tokenizer": tokenizer,
+        "config": config,
+        "count": len(files)
+    }
+
+def check_zip_file():
+    """Check if ZIP file exists and what's in it"""
+    if not os.path.exists(ZIP_PATH):
+        return None
+    
+    try:
+        with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
+            return zip_ref.namelist()
+    except:
+        return None
+
+# ============================================================
+# MODEL LOADER WITH MULTIPLE METHODS
 # ============================================================
 
 @st.cache_resource
 def load_model():
-    """Load the model from /tmp directory"""
+    """Load the model with multiple methods"""
     
-    # Check if model files exist directly
-    if os.path.exists(MODEL_PATH) and os.listdir(MODEL_PATH):
-        st.info(f"📁 Found {len(os.listdir(MODEL_PATH))} files in model directory")
-        files = os.listdir(MODEL_PATH)
-        
-        # Check for model weights
-        model_files = [f for f in files if f.endswith(('.bin', '.safetensors'))]
-        if model_files:
-            st.success(f"✅ Found {len(model_files)} model weight files")
-        else:
-            st.error("❌ No model weight files found (.bin or .safetensors)")
-            st.info("Please upload your model files to /tmp/geocode_model/")
-            return None, None
-        
-        # Check for tokenizer files
-        tokenizer_files = [f for f in files if 'tokenizer' in f]
-        if tokenizer_files:
-            st.success(f"✅ Found {len(tokenizer_files)} tokenizer files")
-        else:
-            st.warning("⚠️ Tokenizer files may be missing")
+    # First, check what we have
+    file_status = check_model_files()
+    zip_contents = check_zip_file()
     
-    # If model directory doesn't exist or is empty, try to extract from zip
-    elif os.path.exists(ZIP_PATH):
-        st.info("📦 Extracting model from uploaded ZIP file...")
+    # Method 1: Check if model files exist directly
+    if file_status["exists"] and file_status["weights"]:
+        st.success(f"✅ Found {len(file_status['weights'])} model weight files")
+        st.success(f"✅ Found {len(file_status['tokenizer'])} tokenizer files")
+        return load_from_directory(MODEL_PATH)
+    
+    # Method 2: Try to extract from ZIP
+    elif zip_contents:
+        st.info(f"📦 Found ZIP file with {len(zip_contents)} files. Extracting...")
         try:
-            # Remove existing directory if it exists
+            # Remove existing directory
             if os.path.exists(MODEL_PATH):
                 shutil.rmtree(MODEL_PATH)
+            os.makedirs(MODEL_PATH, exist_ok=True)
             
-            # Extract zip
+            # Extract ZIP
             with zipfile.ZipFile(ZIP_PATH, 'r') as zip_ref:
                 zip_ref.extractall(MODEL_PATH)
-            st.success("✅ Model extracted successfully!")
             
-            # Verify extraction
-            files = os.listdir(MODEL_PATH)
-            st.info(f"📁 Extracted {len(files)} files")
-            
+            # Check extraction
+            file_status = check_model_files()
+            if file_status["weights"]:
+                st.success("✅ Model extracted successfully!")
+                return load_from_directory(MODEL_PATH)
+            else:
+                st.warning("⚠️ ZIP extracted but no model weights found")
         except Exception as e:
-            st.error(f"❌ Failed to extract model: {e}")
-            st.info("Please upload your model files directly to /tmp/geocode_model/")
-            return None, None
-    else:
-        # No model found anywhere
-        st.error("❌ No model files found!")
-        st.info("""
-        **Please upload your model files:**
-        1. In the Streamlit Cloud dashboard, go to the Files section
-        2. Navigate to `/tmp/geocode_model/`
-        3. Upload all model files (config.json, model-*.safetensors, tokenizer files)
-        **OR**
-        1. Upload a ZIP file named `model.zip` to `/tmp/`
-        """)
-        return None, None
+            st.error(f"❌ Failed to extract ZIP: {e}")
     
-    # Load the model
+    # Method 3: Check for model files in subdirectories
+    if file_status["exists"] and file_status["files"]:
+        st.info("🔍 Searching for model files in subdirectories...")
+        for root, dirs, files in os.walk(MODEL_PATH):
+            for file in files:
+                if file.endswith(('.bin', '.safetensors')):
+                    # Move files to main directory
+                    src = os.path.join(root, file)
+                    dst = os.path.join(MODEL_PATH, file)
+                    shutil.move(src, dst)
+                    st.info(f"Moved {file} to main directory")
+        
+        # Check again
+        file_status = check_model_files()
+        if file_status["weights"]:
+            st.success("✅ Found and organized model files!")
+            return load_from_directory(MODEL_PATH)
+    
+    # No model found
+    st.error("❌ No model files found!")
+    show_upload_instructions()
+    return None, None
+
+def load_from_directory(path):
+    """Load model from directory"""
     try:
         st.info("🧠 Loading model into memory...")
         
         # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+        tokenizer = AutoTokenizer.from_pretrained(path)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
         # Load model with memory optimizations
         model = AutoModelForCausalLM.from_pretrained(
-            MODEL_PATH,
+            path,
             torch_dtype=torch.float16,
             device_map="auto",
             low_cpu_mem_usage=True
@@ -104,31 +147,46 @@ def load_model():
         st.error(f"❌ Error loading model: {e}")
         
         # Show detailed troubleshooting
-        st.info("""
-        **Troubleshooting:**
-        1. Make sure your model directory contains:
-           - config.json
-           - model-*.safetensors files (all 6 parts)
-           - tokenizer.json
-           - tokenizer.model
-           - tokenizer_config.json
-           - special_tokens_map.json
-        2. Check that the files are not corrupted
-        3. Ensure all files are in `/tmp/geocode_model/`
-        """)
+        file_status = check_model_files()
+        st.info(f"📁 Files in directory: {file_status['files']}")
         
-        # Show what files are in the directory
-        if os.path.exists(MODEL_PATH):
-            files = os.listdir(MODEL_PATH)
-            st.write("📁 Files in model directory:", files)
-            
-            # Check specifically for required files
-            required_files = ['config.json']
-            missing = [f for f in required_files if f not in files]
-            if missing:
-                st.error(f"❌ Missing required files: {missing}")
+        if not file_status["config"]:
+            st.error("❌ Missing config.json")
+        if not file_status["weights"]:
+            st.error("❌ Missing model weights (.bin or .safetensors)")
+        if not file_status["tokenizer"]:
+            st.warning("⚠️ Missing tokenizer files")
         
         return None, None
+
+def show_upload_instructions():
+    """Show instructions for uploading files"""
+    st.info("""
+    **📤 How to upload model files:**
+    
+    **Option A: Upload Individual Files**
+    1. Go to your Streamlit Cloud app dashboard
+    2. Click on the **"Files"** section in the left sidebar
+    3. Create the directory `/tmp/geocode_model/`
+    4. Upload all model files:
+       - `config.json`
+       - `model-00001-of-00006.safetensors` (all 6 parts)
+       - `tokenizer.json`
+       - `tokenizer.model`
+       - `tokenizer_config.json`
+       - `special_tokens_map.json`
+    5. Refresh the app
+    
+    **Option B: Upload a ZIP File (Easier)**
+    1. Create a ZIP file containing ALL model files
+    2. Name it `model.zip`
+    3. Upload it to `/tmp/model.zip` in your Streamlit Cloud app
+    4. Refresh the app - it will auto-extract
+    
+    **Option C: Use Hugging Face (Recommended for Production)**
+    1. Upload your model to Hugging Face Hub
+    2. Update the code to load directly from Hugging Face
+    """)
 
 # ============================================================
 # GENERATION FUNCTION
@@ -165,14 +223,12 @@ def generate_code(tokenizer, model, prompt, max_tokens, temperature):
 # STREAMLIT UI
 # ============================================================
 
-# Page configuration
 st.set_page_config(
     page_title="🌍 GeoCode-GPT",
     page_icon="🌍",
     layout="wide"
 )
 
-# Header
 st.title("🌍 GeoCode-GPT - Earth Engine Code Generator")
 st.markdown("""
 Generate Google Earth Engine JavaScript code using AI.
@@ -182,81 +238,52 @@ Describe what you want to do, and the model will generate the code!
 # Sidebar
 with st.sidebar:
     st.header("⚙️ Settings")
-    max_tokens = st.slider(
-        "Max Tokens",
-        min_value=256,
-        max_value=2048,
-        value=1024,
-        step=64,
-        help="Maximum length of generated code"
-    )
-    
-    temperature = st.slider(
-        "Temperature",
-        min_value=0.1,
-        max_value=1.0,
-        value=0.7,
-        step=0.05,
-        help="Higher = more creative, Lower = more deterministic"
-    )
+    max_tokens = st.slider("Max Tokens", 256, 2048, 1024)
+    temperature = st.slider("Temperature", 0.1, 1.0, 0.7, 0.05)
     
     st.divider()
     
     # Show model status
     st.subheader("📊 Model Status")
-    if os.path.exists(MODEL_PATH):
-        files = os.listdir(MODEL_PATH)
-        model_files = [f for f in files if f.endswith(('.bin', '.safetensors'))]
-        tokenizer_files = [f for f in files if 'tokenizer' in f]
-        
-        if model_files and tokenizer_files:
-            st.success(f"✅ Model ready")
-            st.caption(f"   - {len(model_files)} weight files")
-            st.caption(f"   - {len(tokenizer_files)} tokenizer files")
-            
-            # Show total size
+    file_status = check_model_files()
+    
+    if file_status["exists"]:
+        if file_status["weights"]:
+            st.success(f"✅ {len(file_status['weights'])} weight files")
+            if file_status["tokenizer"]:
+                st.success(f"✅ {len(file_status['tokenizer'])} tokenizer files")
+            else:
+                st.warning("⚠️ Missing tokenizer files")
+            # Show file sizes
             total_size = 0
-            for f in model_files:
+            for f in file_status["weights"][:3]:
                 try:
                     size = os.path.getsize(os.path.join(MODEL_PATH, f)) / (1024**3)
                     total_size += size
+                    st.caption(f"   - {f} ({size:.2f} GB)")
                 except:
                     pass
+            if len(file_status["weights"]) > 3:
+                st.caption(f"   ... and {len(file_status['weights']) - 3} more")
             if total_size > 0:
-                st.caption(f"📊 Total size: ~{total_size:.1f} GB")
-        elif model_files:
-            st.warning("⚠️ Model weights found, but tokenizer files missing")
-        elif tokenizer_files:
-            st.warning("⚠️ Tokenizer files found, but model weights missing")
+                st.caption(f"📊 Total: ~{total_size:.1f} GB")
         else:
-            st.warning("⏳ Model files not found")
+            st.warning(f"⚠️ {file_status['count']} files found, but no weights")
+            st.caption(f"Files: {', '.join(file_status['files'][:5])}")
     else:
-        st.info("⏳ No model loaded yet")
+        st.warning("⏳ No model loaded")
+        if os.path.exists(ZIP_PATH):
+            st.info("📦 ZIP file found - will extract on load")
     
     st.divider()
     st.caption("🔧 Built with ❤️ using Transformers & Streamlit")
-    st.caption("📁 Model loaded from /tmp/geocode_model/")
 
 # Load model
-with st.spinner("🔄 Loading model (this may take 2-3 minutes)..."):
+with st.spinner("🔄 Loading model..."):
     tokenizer, model = load_model()
 
 if tokenizer is None or model is None:
-    st.error("❌ Failed to load model. Please upload your model files.")
-    st.info("""
-    **How to upload model files:**
-    1. Go to your Streamlit Cloud app dashboard
-    2. Click on the "Files" section
-    3. Navigate to `/tmp/geocode_model/`
-    4. Upload all model files:
-       - config.json
-       - model-00001-of-00006.safetensors through model-00006-of-00006.safetensors
-       - tokenizer.json
-       - tokenizer.model
-       - tokenizer_config.json
-       - special_tokens_map.json
-    5. Refresh the app
-    """)
+    show_upload_instructions()
     st.stop()
 
 # Main interface
@@ -266,8 +293,7 @@ with col1:
     prompt = st.text_area(
         "🌍 Describe what you want to do:",
         height=150,
-        placeholder="Example: Create a true color composite of Sentinel-2 for California",
-        help="Be specific about the region, dataset, and analysis"
+        placeholder="Example: Create a true color composite of Sentinel-2 for California"
     )
 
 with col2:
@@ -278,8 +304,7 @@ with col2:
         "Export a Landsat 8 image to Google Drive",
         "Create an NDWI water body detection using Sentinel-2",
         "Generate a land cover classification using Random Forest",
-        "Create a time series chart of vegetation health",
-        "Detect deforestation using Sentinel-2 time series"
+        "Create a time series chart of vegetation health"
     ]
     
     for example in examples:
@@ -288,21 +313,17 @@ with col2:
             prompt = example
             st.rerun()
 
-# Generate button
 if st.button("🚀 Generate Code", type="primary", use_container_width=True):
     if not prompt:
-        st.warning("Please enter a description of what you want to do.")
+        st.warning("Please enter a description.")
     else:
         with st.spinner("🤖 Generating code..."):
             try:
-                # Generate code
                 response = generate_code(tokenizer, model, prompt, max_tokens, temperature)
                 
-                # Display results
                 st.subheader("💻 Generated Code")
                 st.code(response, language="javascript")
                 
-                # Download button
                 st.download_button(
                     label="📥 Download Code",
                     data=response,
@@ -313,8 +334,6 @@ if st.button("🚀 Generate Code", type="primary", use_container_width=True):
                 
             except Exception as e:
                 st.error(f"❌ Error generating code: {e}")
-                st.info("Try adjusting the temperature or max tokens settings.")
 
-# Footer
 st.divider()
 st.caption("📌 Tip: Generated code is for Google Earth Engine JavaScript API")
