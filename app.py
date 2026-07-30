@@ -1,11 +1,12 @@
 # ============================================================
-# app.py - MEMORY OPTIMIZED FOR STREAMLIT CLOUD
+# app.py - FIXED GENERATION
 # ============================================================
 
 import streamlit as st
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 import os
+import time
 import gc
 
 # ============================================================
@@ -14,10 +15,6 @@ import gc
 
 HF_MODEL_NAME = "taibitfd/geocodegpt"
 
-# Memory optimization settings
-os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
-os.environ["OMP_NUM_THREADS"] = "1"
-
 st.set_page_config(
     page_title="🌍 GeoCode-GPT",
     page_icon="🌍",
@@ -25,95 +22,82 @@ st.set_page_config(
 )
 
 # ============================================================
-# MODEL LOADER WITH MEMORY OPTIMIZATIONS
+# MODEL LOADER
 # ============================================================
 
 @st.cache_resource
 def load_model():
-    """Load model with memory optimizations for Streamlit Cloud"""
+    """Load model from Hugging Face"""
     try:
         st.info("📥 Loading model from Hugging Face...")
         
-        # Step 1: Load tokenizer
-        st.info("Step 1/3: Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained(HF_MODEL_NAME)
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
         
-        # Step 2: Load model with memory optimizations
-        st.info("Step 2/3: Loading model weights (this takes 2-3 minutes)...")
-        
-        # Use CPU mode with memory optimizations for Streamlit Cloud
         model = AutoModelForCausalLM.from_pretrained(
             HF_MODEL_NAME,
-            torch_dtype=torch.float32,  # Use float32 for CPU stability
-            low_cpu_mem_usage=True,
-            use_safetensors=True
+            torch_dtype=torch.float32,  # Use CPU mode
+            low_cpu_mem_usage=True
         )
-        
-        # Try to move to GPU if available
-        if torch.cuda.is_available():
-            st.info("✅ GPU available, moving model to GPU...")
-            model = model.to('cuda')
         
         st.success("✅ Model loaded successfully!")
         return tokenizer, model
         
     except Exception as e:
-        st.error(f"❌ Error loading model: {str(e)}")
-        st.info("""
-        **Troubleshooting:**
-        1. The model might be too large for the free tier
-        2. Try the 4-bit quantization version below
-        3. Consider upgrading to a paid tier
-        """)
+        st.error(f"❌ Error loading model: {e}")
         return None, None
 
 # ============================================================
-# GENERATION FUNCTION
+# GENERATION FUNCTION - SIMPLIFIED AND RELIABLE
 # ============================================================
 
 def generate_code(tokenizer, model, prompt, max_tokens, temperature):
-    """Generate Earth Engine JavaScript code"""
+    """Generate code with proper error handling"""
     try:
-        system = "You are a Google Earth Engine expert. Generate only JavaScript code. No markdown."
-        full_prompt = f"{system}\n\n{prompt}\n\nCODE:"
+        # Simple system prompt
+        system = "You are a Google Earth Engine expert. Generate only JavaScript code. No markdown or explanations."
+        full_prompt = f"{system}\n\nUser request: {prompt}\n\nCODE:"
         
-        # Tokenize
-        inputs = tokenizer(full_prompt, return_tensors="pt", max_length=1024, truncation=True)
+        # Tokenize with shorter length
+        inputs = tokenizer(
+            full_prompt, 
+            return_tensors="pt", 
+            max_length=1024,  # Reduced from 2048
+            truncation=True
+        )
         
-        # Move to GPU if available
-        if torch.cuda.is_available():
-            inputs = {k: v.to('cuda') for k, v in inputs.items()}
+        # Move to CPU
+        inputs = {k: v.to('cpu') for k, v in inputs.items()}
         
-        # Generate with fewer tokens for memory
+        # Generate with shorter output
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=min(max_tokens, 512),  # Limit for memory
+                max_new_tokens=min(max_tokens, 512),  # Limit to 512 tokens
                 temperature=temperature,
                 do_sample=True,
                 top_p=0.95,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=tokenizer.eos_token_id,
+                repetition_penalty=1.1,
+                no_repeat_ngram_size=3
             )
         
-        # Decode
+        # Decode response
         response = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        
+        # Extract code
         if "CODE:" in response:
             response = response.split("CODE:")[-1].strip()
-        
-        # Clean memory
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        elif "```javascript" in response:
+            response = response.split("```javascript")[-1].split("```")[0].strip()
+        elif "```" in response:
+            response = response.split("```")[1].strip()
         
         return response
         
     except Exception as e:
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        return f"❌ Error: {str(e)}"
+        return f"Error: {str(e)}"
 
 # ============================================================
 # UI
@@ -130,28 +114,12 @@ with st.sidebar:
     
     st.divider()
     st.caption(f"🤗 Model: `{HF_MODEL_NAME}`")
-    
-    # Memory info
-    st.caption("💾 Memory Mode: Optimized")
 
-# Load model with progress
-with st.spinner("🔄 Loading model (this may take 3-5 minutes)..."):
-    tokenizer, model = load_model()
+# Load model
+tokenizer, model = load_model()
 
 if tokenizer is None or model is None:
     st.error("❌ Failed to load model.")
-    st.info("""
-    **Solutions:**
-    1. Wait a few minutes and refresh
-    2. Check the model: https://huggingface.co/taibitfd/geocodegpt
-    3. Try the alternative version below
-    """)
-    
-    # Alternative: Use original model
-    if st.button("🔄 Try alternative model (lzq677/GeoCode-GPT)"):
-        st.cache_resource.clear()
-        st.rerun()
-    
     st.stop()
 
 # Main interface
@@ -161,19 +129,19 @@ prompt = st.text_area(
     placeholder="Example: Create a true color composite of Sentinel-2 for California"
 )
 
-# Quick examples
+# Example buttons
 col1, col2, col3 = st.columns(3)
 with col1:
-    if st.button("🛰️ True Color", use_container_width=True):
-        prompt = "Create a true color composite of Sentinel-2 for California"
+    if st.button("🛰️ NDVI", use_container_width=True):
+        prompt = "Calculate NDVI using Sentinel-2 for California"
         st.rerun()
 with col2:
-    if st.button("🌿 NDVI", use_container_width=True):
-        prompt = "Calculate NDVI using Landsat 8 for Brazil"
+    if st.button("🌿 True Color", use_container_width=True):
+        prompt = "Create a true color composite of Sentinel-2"
         st.rerun()
 with col3:
-    if st.button("💧 Water", use_container_width=True):
-        prompt = "Create an NDWI water body detection using Sentinel-2"
+    if st.button("💧 Water Detection", use_container_width=True):
+        prompt = "Create NDWI water body detection using Sentinel-2"
         st.rerun()
 
 if st.button("🚀 Generate Code", type="primary", use_container_width=True):
@@ -181,25 +149,49 @@ if st.button("🚀 Generate Code", type="primary", use_container_width=True):
         st.warning("Please enter a description.")
     else:
         with st.spinner("🤖 Generating code..."):
-            response = generate_code(tokenizer, model, prompt, max_tokens, temperature)
+            # Show progress with a placeholder
+            progress_placeholder = st.empty()
+            progress_placeholder.info("⏳ Processing your request... This may take 10-20 seconds.")
             
-            if response.startswith("❌"):
-                st.error(response)
-            else:
-                st.subheader("💻 Generated Code")
-                st.code(response, language="javascript")
+            try:
+                # Generate code
+                start_time = time.time()
+                response = generate_code(tokenizer, model, prompt, max_tokens, temperature)
+                elapsed_time = time.time() - start_time
                 
-                col1, col2 = st.columns(2)
-                with col1:
+                progress_placeholder.empty()
+                
+                if response.startswith("Error"):
+                    st.error(response)
+                else:
+                    st.subheader(f"💻 Generated Code (took {elapsed_time:.1f}s)")
+                    st.code(response, language="javascript")
+                    
+                    # Download button
                     st.download_button(
-                        label="📥 Download",
+                        label="📥 Download Code",
                         data=response,
                         file_name="earth_engine_code.js",
-                        mime="text/javascript"
+                        mime="text/javascript",
+                        use_container_width=True
                     )
-                with col2:
-                    st.button("📋 Copy", on_click=lambda: st.write("Select code and copy"))
+                    
+            except Exception as e:
+                progress_placeholder.empty()
+                st.error(f"❌ Error generating code: {str(e)}")
+                st.info("""
+                **Troubleshooting:**
+                1. The model might be processing - wait 30 seconds
+                2. Try simplifying your request
+                3. Reduce the max tokens
+                4. Refresh the page and try again
+                """)
+            
+            # Clear memory
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
 # Footer
 st.divider()
-st.caption("📌 Generated code for Google Earth Engine JavaScript API")
+st.caption("📌 Generated code is for Google Earth Engine JavaScript API")
